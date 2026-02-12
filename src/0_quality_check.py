@@ -11,16 +11,32 @@ import warnings
 ROOT_PATH = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_PATH))
 DATA_PATH = ROOT_PATH / 'data' / 'raw'
-# Add a path for processed data
 PROCESSED_PATH = ROOT_PATH / 'data' / 'processed'
+OUTPUT_PATH = ROOT_PATH / 'data' / 'output'
+
+# Ensure output directory exists
+OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
 
 # --- LOGGING CONFIGURATION ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
+# We set up the logger to write to both console (stdout) and a file.
+logger = logging.getLogger("QualityCheck")
+logger.setLevel(logging.INFO)
+
+# Clear existing handlers if any (prevents duplicate logs in notebooks/re-runs)
+if logger.handlers:
+    logger.handlers = []
+
+# 1. Console Handler
+c_handler = logging.StreamHandler(sys.stdout)
+c_format = logging.Formatter('%(asctime)s | %(message)s', datefmt='%H:%M:%S')
+c_handler.setFormatter(c_format)
+logger.addHandler(c_handler)
+
+# 2. File Handler (Overwrites previous log)
+f_handler = logging.FileHandler(OUTPUT_PATH / 'quality_check_report.txt', mode='w')
+f_format = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s', datefmt='%H:%M:%S')
+f_handler.setFormatter(f_format)
+logger.addHandler(f_handler)
 
 warnings.filterwarnings('ignore')
 
@@ -31,252 +47,223 @@ class PhysioNetValidator:
         'demographics': 'demographic.csv',
         'vitals': 'vitals.csv',
         'labs': 'labs.csv',
+        'diagnostics': 'diagnostics.csv', 
         'dictionary': 'laboratory_dic.csv'
-    }
-
-    EXPECTED_COLUMNS = {
-        'ward_stays': ['stay_id', 'patient_ref', 'start_date', 'end_date', 'age_at_admission', 
-                       'to_icu', 'hosp_mortality_bin', 'ou_med_ref'],
-        'demographics': ['patient_ref', 'sex', 'natio_ref'],
-        'vitals': ['stay_id', 'rc_sap_ref', 'result_num', 'result_txt', 'result_date'],
-        'labs': ['stay_id', 'lab_sap_ref', 'result_num', 'extract_date']
     }
 
     def __init__(self, data_path: Path, output_path: Path):
         self.data_path = data_path
         self.output_path = output_path
         self.data: Dict[str, pd.DataFrame] = {}
-        self._validate_path()
+        self.orphans_to_remove: Dict[str, tuple] = {}
+        self._validate_input_path()
 
-    def _validate_path(self):
+    def _validate_input_path(self):
         if not self.data_path.exists():
-            logger.error(f"❌ Data directory not found: {self.data_path}")
+            logger.error(f"FATAL: Data directory not found: {self.data_path}")
             sys.exit(1)
 
-    def _log_header(self, title: str):
-        logger.info("\n" + "=" * 80)
-        logger.info(title)
-        logger.info("=" * 80 + "\n")
-
-    def _log_section(self, title: str):
-        logger.info(f"\n--- {title} ---")
+    def _print_separator(self, title: str):
+        # Using logger.info ensures this gets written to the text file too
+        logger.info(f"\n{'='*80}\n{title.upper()}\n{'='*80}")
 
     def load_data(self) -> None:
-        self._log_header("1. LOADING PHYSIONET DATASET")
-        logger.info(f"Root Path: {ROOT_PATH}")
-        logger.info(f"Data Path: {self.data_path}")
+        self._print_separator("1. Data Loading & Schema Validation")
         
-        # Check file existence
-        missing_files = []
         for key, filename in self.REQUIRED_FILES.items():
             filepath = self.data_path / filename
-            if filepath.exists():
-                size_mb = filepath.stat().st_size / (1024 * 1024)
-                logger.info(f"✓ {filename:25} ({size_mb:.1f} MB)")
-            else:
-                logger.error(f"✗ {filename:25} MISSING")
-                missing_files.append(filename)
-        
-        if missing_files:
-            raise FileNotFoundError(f"Missing required files: {', '.join(missing_files)}")
+            if not filepath.exists():
+                if key == 'diagnostics':
+                    logger.warning(f"Optional file missing: {filename} (Skipping diagnosis checks)")
+                    self.data[key] = pd.DataFrame()
+                    continue
+                else:
+                    logger.error(f"Missing required file: {filename}")
+                    sys.exit(1)
+            
+            # Load Data
+            try:
+                df = pd.read_csv(filepath, low_memory=False)
+                self.data[key] = df
+                logger.info(f"Loaded {key:15} | Rows: {len(df):<10,} | Cols: {len(df.columns)}")
+            except Exception as e:
+                logger.error(f"Failed to load {filename}: {e}")
+                sys.exit(1)
 
-        logger.info("\nLoading tables into memory...")
+        self._preprocess_types()
 
-        try:
-            self.data['ward_stays'] = pd.read_csv(self.data_path / self.REQUIRED_FILES['ward_stays'], low_memory=False)
-            self.data['demographics'] = pd.read_csv(self.data_path / self.REQUIRED_FILES['demographics'])
-            self.data['vitals'] = pd.read_csv(self.data_path / self.REQUIRED_FILES['vitals'], low_memory=False)
-            self.data['labs'] = pd.read_csv(self.data_path / self.REQUIRED_FILES['labs'], low_memory=False)
-            self.data['dictionary'] = pd.read_csv(self.data_path / self.REQUIRED_FILES['dictionary'])
-        except Exception as e:
-            logger.error(f"Failed to load data: {e}")
-            sys.exit(1)
-
-        logger.info("Converting data types...")
-        self._convert_types()
-        
-        logger.info("\nRecords loaded:")
-        for name, df in self.data.items():
-            logger.info(f"  {name:15}: {len(df):,}")
-
-    def _convert_types(self):
+    def _preprocess_types(self):
         ws = self.data['ward_stays']
-        vitals = self.data['vitals']
-        labs = self.data['labs']
+        if 'episode_ref' in ws.columns:
+            ws['episode_ref'] = pd.to_numeric(ws['episode_ref'], errors='coerce')
+        
+        if not self.data['diagnostics'].empty and 'episode_ref' in self.data['diagnostics'].columns:
+             self.data['diagnostics']['episode_ref'] = pd.to_numeric(self.data['diagnostics']['episode_ref'], errors='coerce')
 
-        ws['start_date'] = pd.to_datetime(ws['start_date'], format='mixed', errors='coerce')
-        ws['end_date'] = pd.to_datetime(ws['end_date'], format='mixed', errors='coerce')
-        vitals['result_date'] = pd.to_datetime(vitals['result_date'], format='mixed', errors='coerce')
-        labs['extract_date'] = pd.to_datetime(labs['extract_date'], format='mixed', errors='coerce')
+        date_cols = ['start_date', 'end_date']
+        for c in date_cols: 
+            if c in ws.columns: ws[c] = pd.to_datetime(ws[c], errors='coerce')
 
         ws['age_at_admission'] = pd.to_numeric(ws['age_at_admission'], errors='coerce')
-        ws['to_icu'] = pd.to_numeric(ws['to_icu'], errors='coerce')
-        ws['hosp_mortality_bin'] = pd.to_numeric(ws['hosp_mortality_bin'], errors='coerce')
-        vitals['result_num'] = pd.to_numeric(vitals['result_num'], errors='coerce')
-        labs['result_num'] = pd.to_numeric(labs['result_num'], errors='coerce')
-
-    def validate_structure(self):
-        self._log_header("2. DATA STRUCTURE VALIDATION")
-        all_valid = True
-        for name, expected_cols in self.EXPECTED_COLUMNS.items():
-            if name not in self.data: continue
-            df = self.data[name]
-            missing = [c for c in expected_cols if c not in df.columns]
-            logger.info(f"{name}:")
-            if missing:
-                logger.error(f"  ❌ Missing columns: {missing}")
-                all_valid = False
-            else:
-                logger.info(f"  ✓ All expected columns present")
-        if all_valid:
-            logger.info("\n✓ Structure validation passed.")
+        if 'to_icu' in ws.columns: ws['to_icu'] = pd.to_numeric(ws['to_icu'], errors='coerce')
+        if 'hosp_mortality_bin' in ws.columns: ws['hosp_mortality_bin'] = pd.to_numeric(ws['hosp_mortality_bin'], errors='coerce')
 
     def check_integrity(self):
-        self._log_header("3. REFERENTIAL INTEGRITY CHECKS")
+        self._print_separator("2. Referential Integrity Check (Orphans)")
+
         ws = self.data['ward_stays']
         demo = self.data['demographics']
         vitals = self.data['vitals']
         labs = self.data['labs']
+        diag = self.data['diagnostics']
 
-        self._log_section("Unique Identifier Counts")
-        logger.info(f"Unique stays (ward_stays): {ws['stay_id'].nunique():,}")
-        logger.info(f"Unique patients (ward_stays): {ws['patient_ref'].nunique():,}")
+        self._check_orphan_link(ws, demo, 'patient_ref', 'WardStays', 'Demographics')
+        self._check_orphan_link(vitals, ws, 'stay_id', 'Vitals', 'WardStays')
+        self._check_orphan_link(labs, ws, 'stay_id', 'Labs', 'WardStays')
 
-        self._log_section("Missing Reference Analysis")
-        missing_demo = set(ws['patient_ref']) - set(demo['patient_ref'])
-        if missing_demo:
-            logger.error(f"❌ {len(missing_demo)} patients missing demographic records")
+        if not diag.empty and 'episode_ref' in ws.columns:
+            self._check_orphan_link(diag, ws, 'episode_ref', 'Diagnostics', 'WardStays(Episodes)')
+        elif not diag.empty:
+            logger.warning("SKIP: 'episode_ref' missing in WardStays. Cannot validate Diagnostics.")
+
+    def _check_orphan_link(self, child_df, parent_df, key, child_name, parent_name):
+        if key not in child_df.columns or key not in parent_df.columns:
+            logger.warning(f"SKIP: Key '{key}' missing in {child_name} or {parent_name}")
+            return
+
+        child_ids = set(child_df[key].dropna())
+        parent_ids = set(parent_df[key].dropna())
+        
+        orphans = child_ids - parent_ids
+        n_orphans = len(orphans)
+        
+        if n_orphans == 0:
+            logger.info(f"[PASS] {child_name:15} -> {parent_name:20} : Integrity Intact")
         else:
-            logger.info("✓ All patients have demographic records")
+            n_rows = child_df[child_df[key].isin(orphans)].shape[0]
+            logger.error(f"[FAIL] {child_name:15} -> {parent_name:20} : {n_orphans:,} orphaned IDs ({n_rows:,} rows)")
+            self.orphans_to_remove[child_name] = (key, orphans)
 
-        valid_stays = set(ws['stay_id'])
-        orphan_vitals = set(vitals['stay_id']) - valid_stays
-        if orphan_vitals:
-            logger.error(f"❌ ERROR: Orphaned vital records for {len(orphan_vitals)} stays")
-            count = len(vitals[vitals['stay_id'].isin(orphan_vitals)])
-            logger.error(f"  -> Total orphaned vital records: {count:,}")
-        else:
-            logger.info("✓ All vital records link to valid stays")
-
-        orphan_labs = set(labs['stay_id']) - valid_stays
-        if orphan_labs:
-            logger.error(f"❌ ERROR: Orphaned lab records for {len(orphan_labs)} stays")
-            count = len(labs[labs['stay_id'].isin(orphan_labs)])
-            logger.error(f"  -> Total orphaned lab records: {count:,}")
-        else:
-            logger.info("✓ All lab records link to valid stays")
-
-    def clean_orphans(self):
-        self._log_header("4. DATA CLEANING (ORPHAN REMOVAL)")
+    def check_coverage(self):
+        self._print_separator("3. Data Coverage Analysis (Inverse Integrity)")
+        
         ws = self.data['ward_stays']
+        demo = self.data['demographics']
         vitals = self.data['vitals']
         labs = self.data['labs']
-        
-        valid_stays = set(ws['stay_id'])
-        vitals_before = len(vitals)
-        labs_before = len(labs)
-        
-        self.data['vitals'] = vitals[vitals['stay_id'].isin(valid_stays)].reset_index(drop=True)
-        self.data['labs'] = labs[labs['stay_id'].isin(valid_stays)].reset_index(drop=True)
-        
-        vitals_removed = vitals_before - len(self.data['vitals'])
-        labs_removed = labs_before - len(self.data['labs'])
-        
-        if vitals_removed > 0 or labs_removed > 0:
-            logger.info("Cleaning Complete:")
-            logger.info(f"  - Removed {vitals_removed:,} orphaned vital records")
-            logger.info(f"  - Removed {labs_removed:,} orphaned lab records")
-        else:
-            logger.info("✓ No orphans found. No cleaning needed.")
+        diag = self.data['diagnostics']
 
-    def check_temporal_plausibility(self):
-        self._log_header("5. TEMPORAL PLAUSIBILITY")
+        self._calc_coverage(demo, ws, 'patient_ref', 'Demographics', 'WardStays')
+        self._calc_coverage(ws, vitals, 'stay_id', 'WardStays', 'Vitals')
+        self._calc_coverage(ws, labs, 'stay_id', 'WardStays', 'Labs')
+
+        if not diag.empty and 'episode_ref' in ws.columns:
+            self._calc_coverage(ws, diag, 'episode_ref', 'WardStays(Epi)', 'Diagnostics')
+
+    def _calc_coverage(self, source_df, target_df, key, source_name, target_name):
+        if key not in source_df.columns or key not in target_df.columns:
+            return
+
+        total_source = source_df[key].nunique()
+        matched_source = source_df[source_df[key].isin(target_df[key])][key].nunique()
+        pct = (matched_source / total_source) * 100 if total_source > 0 else 0
+
+        logger.info(f"{source_name:15} w/ {target_name:<15}: {matched_source:>7,} / {total_source:>7,} ({pct:6.2f}%)")
+
+    def clean_orphans(self):
+        if not self.orphans_to_remove: 
+            return
+
+        self._print_separator("4. Data Cleaning (Orphan Removal)")
+        
+        for table_name, (key, orphan_ids) in self.orphans_to_remove.items():
+            if table_name in self.data:
+                df = self.data[table_name]
+                initial_len = len(df)
+                self.data[table_name] = df[~df[key].isin(orphan_ids)]
+                removed = initial_len - len(self.data[table_name])
+                logger.info(f"Cleaned {table_name:15}: Removed {removed:>7,} rows (Orphaned {key})")
+
+    def generate_cohort_summary(self):
+        self._print_separator("5. Final Cohort Statistics")
+        
         ws = self.data['ward_stays']
-        vitals = self.data['vitals']
+        total_screened = len(ws)
         
-        ws['duration'] = (ws['end_date'] - ws['start_date']).dt.total_seconds() / (24 * 3600)
-        neg_stays = ws[ws['duration'] < 0]
-        if not neg_stays.empty:
-            logger.error(f"❌ ERROR: {len(neg_stays)} stays with negative duration")
+        # Filter Logic
+        if 'care_level_type_ref' in ws.columns:
+            cohort = ws[ws['care_level_type_ref'].str.upper() == 'WARD']
         else:
-            logger.info("✓ No negative stay durations")
+            cohort = ws
 
-        all_dates = pd.concat([ws['start_date'], ws['end_date'], vitals['result_date']])
-        future_dates = all_dates[all_dates > pd.Timestamp.now()]
-        if not future_dates.empty:
-            logger.error(f"❌ ERROR: Found {len(future_dates):,} dates in the future. Expected behavior due to anonymization.")
+        # Population
+        if 'age_at_admission' in cohort.columns:
+            adults = cohort[cohort['age_at_admission'] >= 18]
         else:
-            logger.info("✓ No future dates found")
-
-    def check_age_verification(self):
-        self._log_header("6. AGE VERIFICATION")
-        ws = self.data['ward_stays']
-        if 'age_at_admission' in ws.columns:
-            under_18 = ws[ws['age_at_admission'] < 18]
-            if not under_18.empty:
-                logger.warning(f"⚠️ WARNING: Found {len(under_18)} records for patients under 18")
-            else:
-                logger.info("✓ No patients under 18 found")
-            logger.info(f"Age Mean: {ws['age_at_admission'].mean():.1f} | Max: {ws['age_at_admission'].max()}")
-
-    def check_statistics(self):
-        self._log_header("7. STATISTICAL VALIDATION")
-        ws = self.data['ward_stays']
-        total = len(ws)
-        icu = ws['to_icu'].sum()
-        mortality = ws['hosp_mortality_bin'].sum()
-        logger.info(f"Total Stays: {total:,}")
-        logger.info(f"ICU Transfers: {icu:,} ({icu/total*100:.1f}%)")
-        logger.info(f"Mortality: {mortality:,} ({mortality/total*100:.1f}%)")
-
-    # --- NEW METHOD: SAVE DATA ---
-    def save_clean_data(self):
-        """Saves the cleaned dataframes to the PROCESSED directory."""
-        self._log_header("8. SAVING DATA")
-        
-        # Create output directory if it doesn't exist
-        if not self.output_path.exists():
-            logger.info(f"Creating directory: {self.output_path}")
-            self.output_path.mkdir(parents=True, exist_ok=True)
+            adults = cohort
             
-        logger.info(f"Saving cleaned files to: {self.output_path}")
+        unique_pts = adults['patient_ref'].nunique()
         
-        try:
-            for name, df in self.data.items():
-                filename = self.REQUIRED_FILES[name]
-                save_path = self.output_path / filename
-                
-                logger.info(f"  Saving {filename}...")
-                df.to_csv(save_path, index=False)
-                
-            logger.info("\n✓ All files saved successfully.")
-        except Exception as e:
-            logger.error(f"❌ Error saving files: {e}")
+        # Volume
+        final_ids = set(adults['stay_id'])
+        n_vitals = len(self.data['vitals'][self.data['vitals']['stay_id'].isin(final_ids)])
+        n_labs = len(self.data['labs'][self.data['labs']['stay_id'].isin(final_ids)])
+        
+        # Outcome
+        if 'to_icu' in adults.columns and 'hosp_mortality_bin' in adults.columns:
+            outcomes = ((adults['to_icu'] == 1) | (adults['hosp_mortality_bin'] == 1)).sum()
+            prev = (outcomes / len(adults)) * 100
+        else:
+            outcomes = 0
+            prev = 0
 
-    def run_full_pipeline(self):
+        # Use logger.info to ensure writing to file
+        logger.info(f"{'Total Screened Stays':<25}: {total_screened:,}")
+        logger.info(f"{'Final Cohort Size':<25}: {len(adults):,} (General Ward / Adults)")
+        logger.info(f"{'Patient Population':<25}: {unique_pts:,} unique patients")
+        logger.info(f"{'Data Volume':<25}: {n_vitals/1e6:.2f}M vitals | {n_labs/1e6:.2f}M labs")
+        
+        if not self.data['diagnostics'].empty:
+            if 'episode_ref' in adults.columns:
+                final_eps = set(adults['episode_ref'])
+                n_diag = len(self.data['diagnostics'][self.data['diagnostics']['episode_ref'].isin(final_eps)])
+            else:
+                n_diag = len(self.data['diagnostics'])
+            logger.info(f"{'Diagnostic Coverage':<25}: {n_diag:,} ICD-10 entries")
+        
+        logger.info(f"{'Primary Outcome':<25}: {outcomes:,} events ({prev:.2f}%) [ICU/Death]")
+
+    def save_data(self):
+        self._print_separator("6. Saving Processed Data")
+        if not self.output_path.exists():
+            self.output_path.mkdir(parents=True)
+            
+        for name, df in self.data.items():
+            if df.empty: continue
+            
+            path = self.output_path / self.REQUIRED_FILES[name]
+            try:
+                df.to_csv(path, index=False)
+                logger.info(f"Saved: {path.name:<20} ({len(df):>8,} rows)")
+            except Exception as e:
+                logger.error(f"Failed to save {name}: {e}")
+
+    def run(self):
         self.load_data()
-        self.validate_structure()
         self.check_integrity()
         self.clean_orphans()
-        self.check_temporal_plausibility()
-        self.check_age_verification()
-        self.check_statistics()
-        self.save_clean_data()  # <--- Added saving step
+        self.check_coverage()
+        self.generate_cohort_summary()
+        self.save_data()
+        self._print_separator("Pipeline Complete")
         
-        logger.info("\n" + "="*80)
-        logger.info("✅ QUALITY CHECK PIPELINE COMPLETE")
-        logger.info("="*80)
-
-def main():
-    parser = argparse.ArgumentParser(description="PhysioNet Data Quality Checker")
-    parser.add_argument('--data_path', type=Path, default=DATA_PATH)
-    # Add argument for output path
-    parser.add_argument('--output_path', type=Path, default=PROCESSED_PATH)
-    
-    args = parser.parse_args()
-    
-    validator = PhysioNetValidator(data_path=args.data_path, output_path=args.output_path)
-    validator.run_full_pipeline()
+        print(f"\n[INFO] Report saved to: {OUTPUT_PATH / 'quality_check_report.txt'}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', type=Path, default=DATA_PATH)
+    parser.add_argument('--output', type=Path, default=PROCESSED_PATH)
+    args = parser.parse_args()
+
+    validator = PhysioNetValidator(args.input, args.output)
+    validator.run()
