@@ -6,7 +6,7 @@ An early warning system using machine learning to predict clinical deterioration
 
 Current early warning systems (like NEWS-2) are often reactive. This project utilizes machine learning to:
 1.  **Analyze temporal dynamics** of vital signs and laboratory results.
-2.  **Cluster patients** into specific phenotypes using K-Prototypes.
+2.  **Cluster patients** into specific phenotypes using K-Prototypes (or K-Means when no categorical features remain).
 3.  **Predict deterioration** (ICU transfer or Mortality) using XGBoost and LSTM models.
 
 ##  Repository Structure
@@ -20,13 +20,14 @@ The project is structured to run sequentially as a data pipeline:
 │   └── output/              # Generated plots, visualizations, and clusters
 ├── models/                  # Saved model files (.json, .h5)
 ├── src/
-│   ├── utils/
-│   │   ├── clinical_preproc.py  # Preprocessing logic (Long-format, resampling)
-│   │   └── model_saving.py      # JSON export utilities
 │   ├── 0_quality_check.py   # Step 0: Validation & Cleaning
 │   ├── 1_eda.py             # Step 1: Exploratory Data Analysis
-│   ├── 2_kprototypes.py     # Step 2: Clustering (K-Means/K-Prototypes)
-│   └── 3_model_training.py  # Step 3: XGBoost & LSTM Training
+│   ├── 2_kprototypes.py     # Step 2: Clustering (K-Prototypes/K-Means)
+│   ├── 3_model_training.py  # Step 3: XGBoost & LSTM Training
+│   └── missingness_report.py  # Optional: missing values per column of the processed data
+├── utils/
+│   ├── clinical_preproc.py  # Preprocessing logic (Long-format, resampling)
+│   └── model_saving.py      # JSON export utilities
 ├── requirements.txt         # Python dependencies
 └── README.md
 ```
@@ -37,19 +38,29 @@ The project is structured to run sequentially as a data pipeline:
 
 Data can be found in Physionet.
 
-The pipeline expects four CSV files in `data/raw/`.
+The pipeline expects the following CSV files in `data/raw/`:
 
+| File                 | Required |
+|----------------------|----------|
+| `ward_stays.csv`     | Yes      |
+| `demographic.csv`    | Yes      |
+| `vitals.csv`         | Yes      |
+| `labs.csv`           | Yes      |
+| `laboratory_dic.csv` | Yes      |
+| `diagnostics.csv`    | Optional (diagnosis checks are skipped if missing) |
 
-Some relevants column per data file are listed below:
+The most relevant columns per data file are listed below:
 ### 1. Ward Stays (`ward_stays.csv`)
 
 | Column               | Description                                           |
 |----------------------|-------------------------------------------------------|
-| stay_id              | Unique identifier for the hospital stay              |
+| stay_id              | Unique identifier for the ward stay                  |
 | patient_ref          | Unique patient identifier                            |
-| start_date           | Admission timestamp                                  |
-| end_date             | Discharge timestamp                                  |
-| age_at_admission     | Patient age                                          |
+| episode_ref          | Hospital episode identifier                          |
+| start_date           | Start of the ward stay                               |
+| end_date             | End of the ward stay                                 |
+| care_level_type_ref  | Care level (`WARD` or `ICU`); only `WARD` stays are used |
+| age_at_admission     | Age at admission (exact age, or a 5-year range such as `40-44` when generalized for de-identification) |
 | to_icu               | Target: 1 if transferred to ICU, 0 otherwise         |
 | hosp_mortality_bin   | Target: 1 if deceased in hospital, 0 otherwise       |
 | ou_med_ref           | Operational Unit / Ward reference                    |
@@ -59,7 +70,7 @@ Some relevants column per data file are listed below:
 | Column      | Description                         |
 |-------------|-------------------------------------|
 | patient_ref | Unique patient identifier           |
-| sex         | Biological sex (1=Male, 0=Female)  |
+| sex         | Sex code (1, 2 or 3)                |
 | natio_ref   | Nationality code                   |
 
 ### 3. Vitals (`vitals.csv`)
@@ -106,8 +117,8 @@ Ensure your downloaded files from Physionet are placed in `data/raw/`.
 
 
 
-### 1. Installation (Optional)
-Create a virtual environment and install dependencies to avoid possible verioning / dependencies problems.
+### 1. Installation
+Create a virtual environment and install the dependencies to avoid versioning or dependency conflicts.
 
 ```bash
 conda create -n clinical_env python=3.9
@@ -118,7 +129,7 @@ pip install -r requirements.txt
 ### 2. Execution Pipeline
 
 #### Step 0 — Quality Check & Cleaning
-Validates referential integrity, removes orphans, checks logical ranges (age, dates), and saves cleaned data to `data/processed/`.
+Validates referential integrity, removes orphaned records, reports data coverage and cohort statistics, and saves cleaned data to `data/processed/`. The report is written to `data/output/quality_check_report.txt`.
 
 ```bash
 python src/0_quality_check.py
@@ -132,7 +143,7 @@ python src/1_eda.py
 ```
 
 #### Step 2 — Clustering (Unsupervised)
-Performs K-Prototypes (or K-Means) clustering to identify patient phenotypes. Resamples data to 2-hour windows.
+Performs K-Prototypes clustering (k=4) to identify patient phenotypes, falling back to K-Means when no categorical features remain after preprocessing. Resamples data to 2-hour windows.
 
 ```bash
 python src/2_kprototypes.py
@@ -142,7 +153,7 @@ python src/2_kprototypes.py
 
 Trains and evaluates deterioration prediction models.
 
-1. **XGBoost:** Uses summary statistics (mean, max, min, last).
+1. **XGBoost:** Uses summary statistics (last, mean, std, min, max).
 2. **LSTM:** Uses 3D temporal sequences (Time-series).
 3. Outputs: ROC curves, Confusion Matrices, and SHAP plots.
 
@@ -155,15 +166,31 @@ python src/3_model_training.py
 
 ### Preprocessing
 
-- Resampling to 2-hour intervals using forward-fill and backward-fill
+- Only general ward stays (`care_level_type_ref = WARD`) are used
 - Excluding stays shorter than 48 hours
-- Removing physiological artifacts (e.g., HR > 300)
+- Removing physiologically implausible values (set to missing and dropped):
+
+| Variable | Valid range |
+|----------|-------------|
+| `FC` (heart rate) | 25–250 |
+| `P_ART_S` (systolic BP) | 30–300 |
+| `TEMP` (temperature) | 30–45 |
+| `PULSIOX` (SpO2) | 30–100 |
+| `FR` (respiratory rate) | 3–50 |
+| `LAB1300` (leukocytes) | 0–100,000 |
+| `LAB1314` (hemoglobin) | 2–25 |
+| `age` | 18–110 |
+
+- Keeping the 100 most frequent clinical concepts (plus age and sex)
+- Resampling to 2-hour intervals using forward-fill and backward-fill
 
 ### Models
 
-- **K-Prototypes:** Handles mixed data (numerical vitals + categorical demographics) to group patients into risk clusters.
+- **K-Prototypes:** Handles mixed data (numerical vitals + categorical demographics) to group patients into risk clusters. K-Means is used instead when all features are numeric.
 - **XGBoost:** A gradient boosting classifier trained on aggregated features for interpretability.
-- **LSTM:** A deep learning model that processes the sequential history of patient vitals to capture trends over time.
+- **LSTM:** A deep learning model that processes the sequential history of vitals and laboratory results to capture trends over time.
+
+Both supervised models use a stratified 80/20 train/test split (`random_state=42`). The LSTM training set is balanced by oversampling the positive class.
 
 
 ### Feature Engineering
@@ -192,7 +219,7 @@ Deep learning models utilize the raw temporal sequences to capture dynamic patte
 
 * **Window**: Focuses on the last **72 hours** (36 steps of 2 hours) of hospitalization.
 
-* **Handling**: Sequences are pre-padded or truncated to fixed length.
+* **Handling**: Longer sequences are truncated to their last 36 steps; shorter ones are zero-padded at the end.
 
 * **Input**: 3D Tensor `(Samples, TimeSteps, Features)`.
 
@@ -201,7 +228,7 @@ Deep learning models utilize the raw temporal sequences to capture dynamic patte
 
 ## Contributing
 
-Contributions are welcomed. Please:
+Contributions are welcome. Please:
 
 1. Fork the project
 2. Create a branch for your feature (git checkout -b feature/AmazingFeature)

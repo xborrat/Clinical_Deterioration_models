@@ -1,6 +1,11 @@
-sshtunnel
-sqlalchemy
-pymysql
-psycopg2
-missingno
+pandas>=2.0
+numpy
+scikit-learn
+xgboost>=1.6
+tensorflow>=2.12
+shap
 kmodes
+missingno
+seaborn
+matplotlib
+tqdm
