@@ -1,0 +1,8 @@
+# Dataset files (PhysioNet credentialed access): never commit
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Per-stay outputs derived from the dataset
+data/output/clusters.csv
