@@ -1,50 +1,58 @@
-12:50:42 | INFO     | 
+09:29:00 | INFO     | 
 ================================================================================
 1. DATA LOADING & SCHEMA VALIDATION
 ================================================================================
-12:50:42 | INFO     | Loaded ward_stays      | Rows: 23,833     | Cols: 19
-12:50:42 | INFO     | Loaded demographics    | Rows: 18,632     | Cols: 4
-12:50:50 | INFO     | Loaded vitals          | Rows: 9,538,944  | Cols: 5
-12:50:54 | INFO     | Loaded labs            | Rows: 5,402,896  | Cols: 5
-12:50:54 | INFO     | Loaded diagnostics     | Rows: 230,248    | Cols: 5
-12:50:54 | INFO     | Loaded dictionary      | Rows: 5,115      | Cols: 4
-12:50:54 | INFO     | 
+09:29:00 | INFO     | Loaded ward_stays      | Rows: 23,833     | Cols: 18
+09:29:00 | INFO     | Loaded demographics    | Rows: 18,632     | Cols: 4
+09:29:12 | INFO     | Loaded vitals          | Rows: 9,646,044  | Cols: 5
+09:29:18 | INFO     | Loaded labs            | Rows: 5,403,329  | Cols: 5
+09:29:18 | INFO     | Loaded diagnostics     | Rows: 230,248    | Cols: 5
+09:29:18 | INFO     | Loaded dictionary      | Rows: 5,115      | Cols: 4
+09:29:18 | INFO     | 
 ================================================================================
 2. REFERENTIAL INTEGRITY CHECK (ORPHANS)
 ================================================================================
-12:50:54 | INFO     | [PASS] WardStays       -> Demographics         : Integrity Intact
-12:50:55 | INFO     | [PASS] Vitals          -> WardStays            : Integrity Intact
-12:50:56 | INFO     | [PASS] Labs            -> WardStays            : Integrity Intact
-12:50:56 | INFO     | [PASS] Diagnostics     -> WardStays(Episodes)  : Integrity Intact
-12:50:56 | INFO     | 
+09:29:18 | INFO     | [PASS] WardStays       -> Demographics         : Integrity Intact
+09:29:20 | ERROR    | [FAIL] Vitals          -> WardStays            : 255 orphaned IDs (107,100 rows)
+09:29:21 | ERROR    | [FAIL] Labs            -> WardStays            : 6 orphaned IDs (433 rows)
+09:29:21 | INFO     | [PASS] Diagnostics     -> WardStays(Episodes)  : Integrity Intact
+09:29:21 | INFO     | 
 ================================================================================
-3. DATA COVERAGE ANALYSIS (INVERSE INTEGRITY)
+3. DATA CLEANING (ORPHAN REMOVAL)
 ================================================================================
-12:50:56 | INFO     | Demographics    w/ WardStays      :  18,632 /  18,632 (100.00%)
-12:50:56 | INFO     | WardStays       w/ Vitals         :  22,006 /  23,833 ( 92.33%)
-12:50:56 | INFO     | WardStays       w/ Labs           :  17,853 /  23,833 ( 74.91%)
-12:50:56 | INFO     | WardStays(Epi)  w/ Diagnostics    :  23,541 /  23,541 (100.00%)
-12:50:56 | INFO     | 
+09:29:22 | INFO     | Cleaned vitals         : Removed 107,100 rows (Orphaned stay_id)
+09:29:23 | INFO     | Cleaned labs           : Removed     433 rows (Orphaned stay_id)
+09:29:23 | INFO     | 
+================================================================================
+4. DATA COVERAGE ANALYSIS (INVERSE INTEGRITY)
+================================================================================
+09:29:23 | INFO     | Demographics    w/ WardStays      :  18,632 /  18,632 (100.00%)
+09:29:23 | INFO     | WardStays       w/ Vitals         :  22,006 /  23,833 ( 92.33%)
+09:29:23 | INFO     | WardStays       w/ Labs           :  17,853 /  23,833 ( 74.91%)
+09:29:23 | INFO     | WardStays(Epi)  w/ Diagnostics    :  23,541 /  23,541 (100.00%)
+09:29:23 | INFO     | 
 ================================================================================
 5. FINAL COHORT STATISTICS
 ================================================================================
-12:50:57 | INFO     | Total Screened Stays     : 23,833
-12:50:57 | INFO     | Final Cohort Size        : 19,753 (General Ward / Adults)
-12:50:57 | INFO     | Patient Population       : 15,520 unique patients
-12:50:57 | INFO     | Data Volume              : 8.60M vitals | 4.85M labs
-12:50:57 | INFO     | Diagnostic Coverage      : 194,566 ICD-10 entries
-12:50:57 | INFO     | Primary Outcome          : 783 events (3.96%) [ICU/Death]
-12:50:57 | INFO     | 
+09:29:23 | INFO     | Age at admission         : 19,753 exact | 2,396 5-year ranges | 1 suppressed/missing
+09:29:23 | INFO     | Excluded (age < 18)      : 0 stays
+09:29:23 | INFO     | Total Screened Stays     : 23,833
+09:29:23 | INFO     | Final Cohort Size        : 22,150 (General Ward / Adults, 1,683 non-ward stays excluded)
+09:29:23 | INFO     | Patient Population       : 17,461 unique patients
+09:29:23 | INFO     | Data Volume              : 9.54M vitals | 5.40M labs
+09:29:23 | INFO     | Diagnostic Coverage      : 213,157 ICD-10 entries
+09:29:23 | INFO     | Primary Outcome          : 848 events (3.83%) [ICU/Death]
+09:29:23 | INFO     | 
 ================================================================================
 6. SAVING PROCESSED DATA
 ================================================================================
-12:50:57 | INFO     | Saved: ward_stays.csv       (  23,833 rows)
-12:50:57 | INFO     | Saved: demographic.csv      (  18,632 rows)
-12:51:14 | INFO     | Saved: vitals.csv           (9,538,944 rows)
-12:51:24 | INFO     | Saved: labs.csv             (5,402,896 rows)
-12:51:25 | INFO     | Saved: diagnostics.csv      ( 230,248 rows)
-12:51:25 | INFO     | Saved: laboratory_dic.csv   (   5,115 rows)
-12:51:25 | INFO     | 
+09:29:23 | INFO     | Saved: ward_stays.csv       (  23,833 rows)
+09:29:23 | INFO     | Saved: demographic.csv      (  18,632 rows)
+09:29:55 | INFO     | Saved: vitals.csv           (9,538,944 rows)
+09:30:16 | INFO     | Saved: labs.csv             (5,402,896 rows)
+09:30:17 | INFO     | Saved: diagnostics.csv      ( 230,248 rows)
+09:30:17 | INFO     | Saved: laboratory_dic.csv   (   5,115 rows)
+09:30:17 | INFO     | 
 ================================================================================
 PIPELINE COMPLETE
 ================================================================================

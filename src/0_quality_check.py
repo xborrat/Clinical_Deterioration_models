@@ -82,8 +82,10 @@ class PhysioNetValidator:
                     sys.exit(1)
             
             # Load Data
+            # Only empty cells and 'NULL' are missing: text values such as 'NA' (units)
+            # or 'None' (lab descriptions) must be kept as they are
             try:
-                df = pd.read_csv(filepath, low_memory=False)
+                df = pd.read_csv(filepath, low_memory=False, keep_default_na=False, na_values=['', 'NULL'])
                 self.data[key] = df
                 logger.info(f"Loaded {key:15} | Rows: {len(df):<10,} | Cols: {len(df.columns)}")
             except Exception as e:
@@ -104,7 +106,8 @@ class PhysioNetValidator:
         for c in date_cols: 
             if c in ws.columns: ws[c] = pd.to_datetime(ws[c], errors='coerce')
 
-        ws['age_at_admission'] = pd.to_numeric(ws['age_at_admission'], errors='coerce')
+        # age_at_admission is kept as text: it holds exact ages ('62') and, for
+        # de-identified records, 5-year ranges ('40-44') or '*' (suppressed)
         if 'to_icu' in ws.columns: ws['to_icu'] = pd.to_numeric(ws['to_icu'], errors='coerce')
         if 'hosp_mortality_bin' in ws.columns: ws['hosp_mortality_bin'] = pd.to_numeric(ws['hosp_mortality_bin'], errors='coerce')
 
@@ -117,16 +120,17 @@ class PhysioNetValidator:
         labs = self.data['labs']
         diag = self.data['diagnostics']
 
-        self._check_orphan_link(ws, demo, 'patient_ref', 'WardStays', 'Demographics')
-        self._check_orphan_link(vitals, ws, 'stay_id', 'Vitals', 'WardStays')
-        self._check_orphan_link(labs, ws, 'stay_id', 'Labs', 'WardStays')
+        self._check_orphan_link('ward_stays', ws, demo, 'patient_ref', 'WardStays', 'Demographics')
+        self._check_orphan_link('vitals', vitals, ws, 'stay_id', 'Vitals', 'WardStays')
+        self._check_orphan_link('labs', labs, ws, 'stay_id', 'Labs', 'WardStays')
 
         if not diag.empty and 'episode_ref' in ws.columns:
-            self._check_orphan_link(diag, ws, 'episode_ref', 'Diagnostics', 'WardStays(Episodes)')
+            self._check_orphan_link('diagnostics', diag, ws, 'episode_ref', 'Diagnostics', 'WardStays(Episodes)')
         elif not diag.empty:
             logger.warning("SKIP: 'episode_ref' missing in WardStays. Cannot validate Diagnostics.")
 
-    def _check_orphan_link(self, child_df, parent_df, key, child_name, parent_name):
+    def _check_orphan_link(self, child_table, child_df, parent_df, key, child_name, parent_name):
+        """child_table is the key of the child table in self.data (used to remove the orphans)."""
         if key not in child_df.columns or key not in parent_df.columns:
             logger.warning(f"SKIP: Key '{key}' missing in {child_name} or {parent_name}")
             return
@@ -142,10 +146,10 @@ class PhysioNetValidator:
         else:
             n_rows = child_df[child_df[key].isin(orphans)].shape[0]
             logger.error(f"[FAIL] {child_name:15} -> {parent_name:20} : {n_orphans:,} orphaned IDs ({n_rows:,} rows)")
-            self.orphans_to_remove[child_name] = (key, orphans)
+            self.orphans_to_remove[child_table] = (key, orphans)
 
     def check_coverage(self):
-        self._print_separator("3. Data Coverage Analysis (Inverse Integrity)")
+        self._print_separator("4. Data Coverage Analysis (Inverse Integrity)")
         
         ws = self.data['ward_stays']
         demo = self.data['demographics']
@@ -174,7 +178,7 @@ class PhysioNetValidator:
         if not self.orphans_to_remove: 
             return
 
-        self._print_separator("4. Data Cleaning (Orphan Removal)")
+        self._print_separator("3. Data Cleaning (Orphan Removal)")
         
         for table_name, (key, orphan_ids) in self.orphans_to_remove.items():
             if table_name in self.data:
@@ -183,6 +187,14 @@ class PhysioNetValidator:
                 self.data[table_name] = df[~df[key].isin(orphan_ids)]
                 removed = initial_len - len(self.data[table_name])
                 logger.info(f"Cleaned {table_name:15}: Removed {removed:>7,} rows (Orphaned {key})")
+
+    @staticmethod
+    def _age_bounds(ages: pd.Series):
+        """Returns (lower, upper) numeric bounds per age: '62' -> (62, 62), '40-44' -> (40, 44), '*' -> (NaN, NaN)."""
+        parts = ages.astype(str).str.extract(r'^\s*(\d+(?:\.\d+)?)\s*(?:-\s*(\d+(?:\.\d+)?))?\s*$')
+        lower = pd.to_numeric(parts[0], errors='coerce')
+        upper = pd.to_numeric(parts[1], errors='coerce').fillna(lower)
+        return lower, upper
 
     def generate_cohort_summary(self):
         self._print_separator("5. Final Cohort Statistics")
@@ -196,12 +208,20 @@ class PhysioNetValidator:
         else:
             cohort = ws
 
-        # Population
+        # Population: exclude only stays known to be under 18. Ages given as a range
+        # count as adult unless the whole range is below 18; suppressed ages ('*') are kept
         if 'age_at_admission' in cohort.columns:
-            adults = cohort[cohort['age_at_admission'] >= 18]
+            age_lo, age_hi = self._age_bounds(cohort['age_at_admission'])
+            exact = age_lo.notna() & (age_lo == age_hi)
+            ranged = age_lo.notna() & (age_lo != age_hi)
+            logger.info(f"{'Age at admission':<25}: {exact.sum():,} exact | {ranged.sum():,} 5-year ranges | "
+                        f"{(~exact & ~ranged).sum():,} suppressed/missing")
+            minors = age_hi < 18
+            adults = cohort[~minors]
+            logger.info(f"{'Excluded (age < 18)':<25}: {minors.sum():,} stays")
         else:
             adults = cohort
-            
+
         unique_pts = adults['patient_ref'].nunique()
         
         # Volume
@@ -219,7 +239,8 @@ class PhysioNetValidator:
 
         # Use logger.info to ensure writing to file
         logger.info(f"{'Total Screened Stays':<25}: {total_screened:,}")
-        logger.info(f"{'Final Cohort Size':<25}: {len(adults):,} (General Ward / Adults)")
+        logger.info(f"{'Final Cohort Size':<25}: {len(adults):,} (General Ward / Adults, "
+                    f"{total_screened - len(cohort):,} non-ward stays excluded)")
         logger.info(f"{'Patient Population':<25}: {unique_pts:,} unique patients")
         logger.info(f"{'Data Volume':<25}: {n_vitals/1e6:.2f}M vitals | {n_labs/1e6:.2f}M labs")
         
